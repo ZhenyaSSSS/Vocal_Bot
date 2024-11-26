@@ -25,6 +25,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from forum_poster import ForumPoster
 from memory_updater import update_memory
 import glob
+import sys
 
 # Фильтры для логирования
 class WarningErrorFilter(logging.Filter):
@@ -59,7 +60,32 @@ logger.addHandler(console_handler)
 logger.addHandler(file_handler)
 logger.addHandler(memory_file_handler)
 
-STATE_FILE = "last_id.json"
+class BotConfig:
+    """Класс для хранения конфигурации бота"""
+    def __init__(self, config_dict):
+        self.forum_url = config_dict.get('forum_url', '')
+        self.username = config_dict.get('username', '')
+        self.password = config_dict.get('password', '')
+        self.message_limit = config_dict.get('MESSAGE_LIMIT', 25)
+        self.check_interval = config_dict.get('check_interval', 5)
+        self.state_file = config_dict.get('STATE_FILE', 'last_id.json')
+        self.api_keys = config_dict.get('API_KEYS', [])
+        self.current_key_index = 0
+        
+        # Инициализация Gemini
+        if self.api_keys:
+            genai.configure(api_key=self.api_keys[0])
+            self.generation_config = GenerationConfig(
+                temperature=0.15,
+                top_p=0.25,
+                top_k=40,
+                max_output_tokens=2048,
+            )
+            self.model = genai.GenerativeModel("gemini-1.5-pro-002")
+        else:
+            self.generation_config = None
+            self.model = None
+            logger.warning("Не найдены API ключи для инициализации модели Gemini")
 
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
@@ -73,17 +99,14 @@ HEADERS = {
     'Sec-Fetch-Site': 'none',
     'Sec-Fetch-User': '?1',
 }
-
-def switch_api_key(content=None):
+def switch_api_key(bot_config, content=None):
     """Переключение на следующий API ключ"""
-    global current_key_index, genai_model
-    
-    current_key_index = (current_key_index + 1) % len(API_KEYS)
-    new_key = API_KEYS[current_key_index]
+    bot_config.current_key_index = (bot_config.current_key_index + 1) % len(bot_config.api_keys)
+    new_key = bot_config.api_keys[bot_config.current_key_index]
     
     try:
         genai.configure(api_key=new_key)
-        genai_model = genai.GenerativeModel("gemini-1.5-pro-002")
+        bot_config.model = genai.GenerativeModel("gemini-1.5-pro-002")
         
         if content and isinstance(content, list):
             new_content = []
@@ -101,11 +124,11 @@ def switch_api_key(content=None):
                     new_content.append(part)
             return True, new_content
             
-        logger.info(f"Успешно переключились на API ключ {current_key_index + 1}")
+        logger.info(f"Успешно переключились на API ключ {bot_config.current_key_index + 1}")
         return True, content
         
     except Exception as e:
-        logger.error(f"Ошибка при переключении на ключ {current_key_index + 1}: {e}")
+        logger.error(f"Ошибка при переключении на ключ {bot_config.current_key_index + 1}: {e}")
         return False, content
 
 def create_session():
@@ -295,6 +318,15 @@ def download_smule_audio(url, output_filename, max_retries=3, base_delay=5):
             options.add_experimental_option("excludeSwitches", ["enable-automation"])
             options.add_experimental_option('useAutomationExtension', False)
             
+            # Получаем путь к папке с исполняемым файлом
+            if getattr(sys, 'frozen', False):
+                application_path = os.path.dirname(sys.executable)
+            else:
+                application_path = os.path.dirname(os.path.abspath(__file__))
+                
+            # Путь к файлам selenium_stealth
+            stealth_path = os.path.join(application_path, 'selenium_stealth')
+            
             logger.info(f"Попытка {attempt + 1}/{max_retries} скачать аудио со Smule: {url}")
             driver = webdriver.Chrome(options=options)
             
@@ -306,6 +338,7 @@ def download_smule_audio(url, output_filename, max_retries=3, base_delay=5):
                     webgl_vendor="Intel Inc.",
                     renderer="Intel Iris OpenGL Engine",
                     fix_hairline=True,
+                    js_path=stealth_path  # Используем локальный путь
                 )
                 
                 try:
@@ -326,7 +359,7 @@ def download_smule_audio(url, output_filename, max_retries=3, base_delay=5):
                     content = driver.page_source
                     audio_url = None
                     
-                    # Поиск ссылки на аудио
+                    # Поск ссылки на аудио
                     try:
                         audio_url = content.split('twitter:player:stream" content="')[1].split('">')[0].replace('amp;', '')
                         logger.info(f"Найден URL аудио через meta тег: {audio_url}")
@@ -440,7 +473,7 @@ def extract_image_links(content, base_url="https://musforums.ru"):
             image_links.append(href)
     
     return image_links
-def parse_thread(url):
+def parse_thread(url, bot_config):
     """
     Получает ссылку на тред и возвращает данные в формате словаря:
     {
@@ -475,7 +508,7 @@ def parse_thread(url):
         soup = BeautifulSoup(response.content, 'html.parser')
 
         if page == 1:
-            # Извлечение заголовка темы
+            # звлечение заголовка темы
             title_tag = soup.find('h1', class_='p-title-value')
             title = title_tag.text.strip() if title_tag else "Без заголовка"
             logger.debug(f"Заголовок треда: {title}")
@@ -585,8 +618,8 @@ def parse_thread(url):
 
     logger.info(f"Тред '{title}' успешно спарсен. Всего страниц: {page}")
     
-    # Обрезаем сообщения до MESSAGE_LIMIT
-    messages = messages[-MESSAGE_LIMIT:]
+    # Обрезаем сообщения до message_limit из конфигурации
+    messages = messages[-bot_config.message_limit:]
     
     # Собираем ссылки только из отфильтрованных сообщений
     unique_audio_links = set()
@@ -684,16 +717,8 @@ def send_to_openai(content):
         logger.error(traceback.format_exc())
         return None
 
-def send_to_genai(content, model, max_retries=3, base_delay=5):
-    """Модифицированная функция с поддержкой ротации ключей и перезагрузкой медиафайлов"""
-    # Создаем конфигурацию для генерации
-    generation_config = genai.GenerationConfig(
-        temperature=0.15,
-        top_p=0.25,
-        top_k=40,
-        max_output_tokens=2048,
-    )
-
+def send_to_genai(content, bot_config, max_retries=3, base_delay=5):
+    """Отправка запроса к Gemini API с использованием конфигурации"""
     if isinstance(content, list):
         logger.info(f"Отправка списка в GenAI. Длина списка: {len(content)} элементов")
     else:
@@ -701,17 +726,13 @@ def send_to_genai(content, model, max_retries=3, base_delay=5):
     
     current_content = content
     
-    for attempt in range(max_retries * len(API_KEYS)):
+    for attempt in range(max_retries * len(bot_config.api_keys)):
         try:
-            logger.info(f"Попытка {attempt + 1} отправки запроса к Google Generative AI.")
-            
-            if isinstance(current_content, list):
-                response = model.generate_content(contents=current_content, generation_config=generation_config)
-            else:
-                response = model.generate_content(contents=current_content, generation_config=generation_config)
-                
+            response = bot_config.model.generate_content(
+                contents=current_content, 
+                generation_config=bot_config.generation_config
+            )
             logger.info("Важное: Получен ответ от Google Generative AI.")
-            logger.debug(f"Содержимое ответа GenAI: {response.text}")
             return response.text
             
         except Exception as e:
@@ -719,11 +740,11 @@ def send_to_genai(content, model, max_retries=3, base_delay=5):
             
             if "quota" in str(e).lower() or "permission" in str(e).lower():
                 logger.warning("Обнаружено превышение квоты или ошибка доступа, переключаемся на следующий ключ")
-                success, current_content = switch_api_key(current_content)
+                success, current_content = switch_api_key(bot_config, current_content)
                 if not success:
                     continue
             
-            if attempt < (max_retries * len(API_KEYS) - 1):
+            if attempt < (max_retries * len(bot_config.api_keys) - 1):
                 delay = base_delay * (2 ** (attempt % max_retries))
                 logger.info(f"Ожидание {delay} секунд перед следующей попыткой...")
                 time.sleep(delay)
@@ -776,37 +797,22 @@ def handle_new_message(thread_id, genai_request=None, genai_model=None, forum_co
     # Объединение содержимого
     combined_content = f"{add_info}\n\n{thread_output}"
     logger.debug("Содержимое add_info.txt и thread_output.txt объединено.")
-    
-    if USE_GENAI:
-        if genai_request:
-            # Используем переданную модель
-            genai_response = send_to_genai([combined_content] + genai_request, genai_model)
-        else:
-            # Используем переданную модель
-            genai_response = send_to_genai(combined_content, genai_model)
-        response_content = genai_response
+    if genai_request:
+        # Используем переданную модель
+        genai_response = send_to_genai([combined_content] + genai_request, genai_model)
     else:
-        # Отправка запроса в OpenAI
-        openai_response = send_to_openai(combined_content)
-        response_content = openai_response
-    
+        # Используем переданную модель
+        genai_response = send_to_genai(combined_content, genai_model)
+    response_content = genai_response
     if response_content:
         # Проверяем, является ли ответ допустимым JSON
-        if not USE_GENAI:
-            try:
-                openai_data = json.loads(response_content)
-                logger.debug("Ответ модели успешно преобразован в JSON.")
-            except json.JSONDecodeError:
-                logger.error("Ответ от OpenAI не является допустимым JSON.")
-                openai_data = {"need_comment": False}  # Или какой-либо другой дефолтный объект
-        else:
-            try:
-                openai_data = json.loads(response_content[7:-4])
-                logger.debug("Ответ модели успешно преобразован в JSON.")
-            except json.JSONDecodeError:
-                logger.error("Ответ от OpenAI не является допустимым JSON.")
-                openai_data = {"need_comment": False}  # Или какой-либо другой дефолтный объект
-            logger.debug("Ответ от GenAI преобразован в JSON-совместимый формат.")
+        try:
+            openai_data = json.loads(response_content[7:-4])
+            logger.debug("Ответ модели успешно преобразован в JSON.")
+        except json.JSONDecodeError:
+            logger.error("Ответ от OpenAI не является допустимым JSON.")
+            openai_data = {"need_comment": False}  # Или какой-либо другой дефолтный объект
+        logger.debug("Ответ от GenAI преобразован в JSON-совместимый формат.")
         
         # Получение сообщения для отправки
         reply_message = openai_data.get("message")
@@ -853,7 +859,7 @@ def handle_new_message(thread_id, genai_request=None, genai_model=None, forum_co
                 else:
                     logger.warning("Файл updated_memory.json не найден для копирования.")
             except Exception as e:
-                logger.error(f"Ошибка при копировании ��айла памяти: {e}")
+                logger.error(f"Ошибка при копировани�� айла памяти: {e}")
                 logger.error(traceback.format_exc())
             
             # Обновление памяти с помощью функции из json_pool.py
@@ -920,11 +926,12 @@ def cleanup_temp_files(file_patterns=None):
     except Exception as e:
         logger.error(f"Ошибка при очистке временных файлов: {e}")
 
-def check_new_messages(thread_url, last_ids, genai_model=None, forum_config=None):
-    """Проверка новых сообщений в треде"""
+def check_new_messages(thread_url, last_ids, bot_config):
+    """Проверка новых сообщений с использованием конфигурации"""
     try:
         logger.info(f"Проверка новых сообщений для треда: {thread_url}")
-        thread_data = parse_thread(thread_url)
+        thread_data = parse_thread(thread_url, bot_config)
+        
         if not thread_data:
             logger.warning(f"Важное: Не удалось получить данные треда {thread_url}. Возможно, он недоступен.")
             return last_ids
@@ -951,40 +958,45 @@ def check_new_messages(thread_url, last_ids, genai_model=None, forum_config=None
                     last_ids[thread_id] = latest_id
                     write_thread_to_file(thread_data, "thread_output.txt", ".\\updated_memory.json")
                     
-                    if USE_GENAI:
-                        media_files = []
-                        media_ids = []
+                    media_files = []
+                    media_ids = []
+                    
+                    try:
+                        for i, audio_link in enumerate(thread_data['unique_audio_links']):
+                            audio_filename = f'audio_{i+1}.mp3'
+                            if download_audio(audio_link, audio_filename):
+                                media_files.append(audio_filename)
+                                media_ids.append(f'audio_{i+1}.mp3: {audio_link}')
                         
-                        try:
-                            for i, audio_link in enumerate(thread_data['unique_audio_links']):
-                                audio_filename = f'audio_{i+1}.mp3'
-                                if download_audio(audio_link, audio_filename):
-                                    media_files.append(audio_filename)
-                                    media_ids.append(f'audio_{i+1}.mp3: {audio_link}')
-                            
-                            for i, image_link in enumerate(thread_data['unique_image_links']):
-                                image_filename = f'image_{i+1}.{image_link.split(".")[-1]}'
-                                if download_image(image_link, image_filename):
-                                    media_files.append(image_filename)
-                                    media_ids.append(f'image_{i+1}: {image_link}')
-                            
-                            genai_request = []
-                            for i, media_file in enumerate(media_files):
-                                uploaded_file = safe_upload_file(media_file)
-                                if uploaded_file is not None:
-                                    genai_request.extend([media_ids[i], uploaded_file])
-                                else:
-                                    logger.warning(f"Пропуск файла {media_file} из-за ошибки загрузки")
-                            
-                            if genai_request:
-                                handle_new_message(thread_id, genai_request, genai_model, forum_config)
+                        for i, image_link in enumerate(thread_data['unique_image_links']):
+                            image_filename = f'image_{i+1}.{image_link.split(".")[-1]}'
+                            if download_image(image_link, image_filename):
+                                media_files.append(image_filename)
+                                media_ids.append(f'image_{i+1}: {image_link}')
+                        
+                        genai_request = []
+                        for i, media_file in enumerate(media_files):
+                            uploaded_file = safe_upload_file(media_file)
+                            if uploaded_file is not None:
+                                genai_request.extend([media_ids[i], uploaded_file])
                             else:
-                                handle_new_message(thread_id, None, genai_model, forum_config)
-                        finally:
-                            # Очистка временных файлов после обработки
-                            cleanup_temp_files()
-                    else:
-                        handle_new_message(thread_id, None, None, forum_config)
+                                logger.warning(f"Пропуск файла {media_file} из-за ошибки загрузки")
+                        
+                        if genai_request:
+                            handle_new_message(thread_id, genai_request, bot_config, {
+                                'forum_url': bot_config.forum_url,
+                                'username': bot_config.username,
+                                'password': bot_config.password
+                            })
+                        else:
+                            handle_new_message(thread_id, None, bot_config, {
+                                'forum_url': bot_config.forum_url,
+                                'username': bot_config.username,
+                                'password': bot_config.password
+                            })
+                    finally:
+                        # Очистка временных файлов после обработки
+                        cleanup_temp_files()
         else:
             print(f"**Новый тред '{thread_data['title']}' от {thread_data['creator']}:**\n{latest_message['content']}\n")
             logger.info(f"Обнаружен новый тред '{thread_data['title']}' от {thread_data['creator']}")
@@ -992,92 +1004,47 @@ def check_new_messages(thread_url, last_ids, genai_model=None, forum_config=None
             last_ids[thread_id] = latest_id
             write_thread_to_file(thread_data, "thread_output.txt", ".\\updated_memory.json")
             
-            if USE_GENAI:
-                media_files = []
-                media_ids = []
+            media_files = []
+            media_ids = []
+            
+            try:
+                for i, audio_link in enumerate(thread_data['unique_audio_links']):
+                    audio_filename = f'audio_{i+1}.mp3'
+                    if download_audio(audio_link, audio_filename):
+                        media_files.append(audio_filename)
+                        media_ids.append(f'audio_{i+1}.mp3: {audio_link}')
                 
-                try:
-                    for i, audio_link in enumerate(thread_data['unique_audio_links']):
-                        audio_filename = f'audio_{i+1}.mp3'
-                        if download_audio(audio_link, audio_filename):
-                            media_files.append(audio_filename)
-                            media_ids.append(f'audio_{i+1}.mp3: {audio_link}')
-                    
-                    for i, image_link in enumerate(thread_data['unique_image_links']):
-                        image_filename = f'image_{i+1}.{image_link.split(".")[-1]}'
-                        if download_image(image_link, image_filename):
-                            media_files.append(image_filename)
-                            media_ids.append(f'image_{i+1}: {image_link}')
-                    
-                    genai_request = []
-                    for i, media_file in enumerate(media_files):
-                        uploaded_file = safe_upload_file(media_file)
-                        if uploaded_file is not None:
-                            genai_request.extend([media_ids[i], uploaded_file])
-                        else:
-                            logger.warning(f"Пропуск файла {media_file} из-за ошибки загрузки")
-                    
-                    if genai_request:
-                        handle_new_message(thread_id, genai_request, genai_model, forum_config)
+                for i, image_link in enumerate(thread_data['unique_image_links']):
+                    image_filename = f'image_{i+1}.{image_link.split(".")[-1]}'
+                    if download_image(image_link, image_filename):
+                        media_files.append(image_filename)
+                        media_ids.append(f'image_{i+1}: {image_link}')
+                
+                genai_request = []
+                for i, media_file in enumerate(media_files):
+                    uploaded_file = safe_upload_file(media_file)
+                    if uploaded_file is not None:
+                        genai_request.extend([media_ids[i], uploaded_file])
                     else:
-                        handle_new_message(thread_id, None, genai_model, forum_config)
-                finally:
-                    # Очистка временных файлов после обработки
-                    cleanup_temp_files()
-            else:
-                handle_new_message(thread_id, None, None, forum_config)
+                        logger.warning(f"Пропуск файла {media_file} из-за ошибки загрузки")
+                
+                if genai_request:
+                    handle_new_message(thread_id, genai_request, bot_config, {
+                        'forum_url': bot_config.forum_url,
+                        'username': bot_config.username,
+                        'password': bot_config.password
+                    })
+                else:
+                    handle_new_message(thread_id, None, bot_config, {
+                        'forum_url': bot_config.forum_url,
+                        'username': bot_config.username,
+                        'password': bot_config.password
+                    })
+            finally:
+                # Очистка временных файлов после обработки
+                cleanup_temp_files()
     except Exception as e:
         logger.error(f"Ошибка при проверке новых сообщений: {e}")
         cleanup_temp_files()  # Очистка в случае ошибки
     
     return last_ids
-
-# Конфигурация API
-USE_GENAI = True  # True - использовать Google Generative AI, False - OpenAI
-
-# Максимальное количество сохраняемых сообщений
-MESSAGE_LIMIT = 25
-
-# API ключи Google Generative AI
-API_KEYS = [
-]
-current_key_index = 0
-
-# if __name__ == "__main__":
-#     forum_url = "https://musforums.ru/index.php?forums/%D0%A4%D0%BE%D1%80%D1%83%D0%BC-%D0%B2%D0%BE%D0%BA%D0%B0%D0%BB%D0%B8%D1%81%D1%82%D0%BE%D0%B2.9/"
-    
-#     if USE_GENAI:
-#         os.environ['API_KEY'] = API_KEYS[current_key_index]
-#         genai.configure(api_key=os.environ["API_KEY"])
-#         generation_config = GenerationConfig(temperature=0.15)
-#         genai_model = genai.GenerativeModel("gemini-1.5-pro-002")
-#         logger.debug("Инициализирован Google Generative AI клиент.")
-#     else:
-#         openai.api_key = os.getenv("OPENAI_API_KEY")
-#         logger.debug("Инициализирован OpenAI API клиент.")
-    
-#     username = ""
-#     password = ""
-#     poster = ForumPoster(forum_url, username, password)
-    
-#     last_ids = load_last_id(STATE_FILE)
-#     logger.info("Запуск основного цикла парсинга.")
-    
-#     while True:
-#         logger.debug("Начало итерации поиска тредов.")
-#         threads = list_threads(forum_url)
-#         if not threads:
-#             logger.warning("Нет доступных тредов для парсинга.")
-#         else:
-#             logger.info(f"Начинается проврка {len(threads)} тредов.")
-#             for thread_url in threads:
-#                 last_ids = check_new_messages(thread_url, last_ids)
-#                 delay = random.uniform(1, 3)
-#                 logger.debug(f"Задержка перед следующим запросом: {delay:.2f} секунд.")
-#                 time.sleep(delay)
-        
-#         save_last_id(STATE_FILE, last_ids)
-        
-#         sleep_time = 5
-#         logger.debug(f"Задержка перед следующей итерацией: {sleep_time} секунд.")
-#         time.sleep(sleep_time)

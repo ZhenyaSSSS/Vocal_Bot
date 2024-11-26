@@ -2,10 +2,10 @@ import os
 import logging
 import google.generativeai as genai
 from google.generativeai import GenerationConfig
-from PyQt5.QtWidgets import *
-from PyQt5.QtCore import *
-from PyQt5.QtGui import *
-
+from PyQt6.QtWidgets import *
+from PyQt6.QtCore import *
+from PyQt6.QtGui import *
+from bot import BotConfig
 # Настройка логирования
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -24,7 +24,6 @@ logger.addHandler(console_handler)
 logger.addHandler(file_handler)
 
 # Глобальные настройки
-USE_GENAI = True
 import sys
 import json
 import logging
@@ -100,7 +99,7 @@ class BotWorker(QThread):
         self.config = config
         self.running = True
         self.paused = False
-        self.genai_model = None
+        self.bot_config = BotConfig(config)  # Создаем объект конфигурации бота
         
     def pause(self):
         """Приостановка/возобновление работы бота"""
@@ -112,18 +111,6 @@ class BotWorker(QThread):
         
     def run(self):
         try:
-            # Инициализируем API с ключами из конфигурации
-            global API_KEYS, current_key_index
-            API_KEYS = self.config['API_KEYS']
-            current_key_index = 0
-            
-            if USE_GENAI and API_KEYS:
-                os.environ['API_KEY'] = API_KEYS[current_key_index]
-                genai.configure(api_key=os.environ["API_KEY"])
-                generation_config = GenerationConfig(temperature=0.15)
-                self.genai_model = genai.GenerativeModel("gemini-1.5-pro-002")
-                logger.debug("Инициализирован Google Generative AI клиент.")
-            
             last_ids = load_last_id(self.config['STATE_FILE'])
             
             while self.running:
@@ -135,18 +122,11 @@ class BotWorker(QThread):
                             for thread_url in threads:
                                 if not self.running or self.paused:
                                     break
-                                # Создаем конфигурацию форума
-                                forum_config = {
-                                    'forum_url': self.config['forum_url'],
-                                    'username': self.config['username'],
-                                    'password': self.config['password']
-                                }
-                                # Передаем конфигурацию форума
+                                # Передаем объект конфигурации бота
                                 last_ids = check_new_messages(
                                     thread_url, 
                                     last_ids, 
-                                    self.genai_model,
-                                    forum_config
+                                    self.bot_config
                                 )
                                 self.message_received.emit(f"Проверен тред: {thread_url}")
                         
@@ -166,7 +146,7 @@ class BotWorker(QThread):
             self.message_received.emit(f"Критическая ошибка: {str(e)}")
         finally:
             logger.info("Поток бота завершен")
-            
+
     def stop(self):
         """Безопасная остановка потока"""
         logger.info("Запрошена остановка потока бота")
@@ -381,6 +361,13 @@ class BotGUI(QMainWindow):
         self.config_file = "bot_config.json"
         self.load_config()
         
+        # Инициализация API перед созданием UI
+        if self.config.get('API_KEYS'):
+            try:
+                genai.configure(api_key=self.config['API_KEYS'][0])
+            except Exception as e:
+                logger.error(f"Ошибка при инициализации API: {e}")
+        
         self.init_ui()
         self.setup_logging()
         self.bot_worker = None
@@ -414,6 +401,10 @@ class BotGUI(QMainWindow):
         # Вкладка API ключей
         api_keys_tab = self.create_api_keys_tab()
         tabs.addTab(api_keys_tab, "API ключи")
+        
+        # Добавляем новую вкладку настроек модели
+        model_settings_tab = self.create_model_settings_tab()
+        tabs.addTab(model_settings_tab, "Настройки модели")
 
     def create_control_tab(self):
         control_tab = QWidget()
@@ -427,6 +418,7 @@ class BotGUI(QMainWindow):
         forum_layout = QHBoxLayout()
         forum_layout.addWidget(QLabel("URL форума:"))
         self.forum_url_edit = QLineEdit(self.config['forum_url'])
+        self.forum_url_edit.textChanged.connect(self.save_settings)  # Добавляем обработчик
         forum_layout.addWidget(self.forum_url_edit)
         settings_layout.addLayout(forum_layout)
         
@@ -434,10 +426,12 @@ class BotGUI(QMainWindow):
         creds_layout = QHBoxLayout()
         creds_layout.addWidget(QLabel("Логин:"))
         self.username_edit = QLineEdit(self.config['username'])
+        self.username_edit.textChanged.connect(self.save_settings)  # Добавляем обработчик
         creds_layout.addWidget(self.username_edit)
         creds_layout.addWidget(QLabel("Пароль:"))
         self.password_edit = QLineEdit(self.config['password'])
         self.password_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.password_edit.textChanged.connect(self.save_settings)  # Добавляем обработчик
         creds_layout.addWidget(self.password_edit)
         settings_layout.addLayout(creds_layout)
         
@@ -447,20 +441,49 @@ class BotGUI(QMainWindow):
         self.interval_spin = QSpinBox()
         self.interval_spin.setRange(1, 3600)
         self.interval_spin.setValue(self.config['check_interval'])
+        self.interval_spin.valueChanged.connect(self.save_settings)  # Добавляем обработчик
         interval_layout.addWidget(self.interval_spin)
         settings_layout.addLayout(interval_layout)
         
-        # Добавляем настройку лимита сообщений после интервала проверки
+        # Лимит сообщений
         message_limit_layout = QHBoxLayout()
         message_limit_layout.addWidget(QLabel("Лимит сообщений:"))
         self.message_limit_spin = QSpinBox()
         self.message_limit_spin.setRange(1, 1000)
         self.message_limit_spin.setValue(self.config['MESSAGE_LIMIT'])
+        self.message_limit_spin.valueChanged.connect(self.save_settings)  # Добавляем обработчик
         message_limit_layout.addWidget(self.message_limit_spin)
         settings_layout.addLayout(message_limit_layout)
         
         settings_group.setLayout(settings_layout)
         control_layout.addWidget(settings_group)
+        
+        # Добавляем группу фильтров логов
+        log_filter_group = QGroupBox("Фильтры логов")
+        log_filter_layout = QHBoxLayout()
+        
+        self.log_filters = {
+            'DEBUG': QCheckBox('DEBUG'),
+            'INFO': QCheckBox('INFO'),
+            'WARNING': QCheckBox('WARNING'),
+            'ERROR': QCheckBox('ERROR'),
+            'CRITICAL': QCheckBox('CRITICAL')
+        }
+        
+        # По умолчанию включаем INFO и выше
+        for level, checkbox in self.log_filters.items():
+            checkbox.setChecked(level != 'DEBUG')
+            checkbox.stateChanged.connect(self.update_log_display)
+            log_filter_layout.addWidget(checkbox)
+        
+        log_filter_group.setLayout(log_filter_layout)
+        control_layout.addWidget(log_filter_group)
+        
+        # Лог с поддержкой фильтрации
+        self.log_text = QTextEdit()
+        self.log_text.setReadOnly(True)
+        self.log_messages = []  # Сохраняем все сообщения для фильтрации
+        control_layout.addWidget(self.log_text)
         
         # Кнопки управления
         buttons_layout = QHBoxLayout()
@@ -479,11 +502,6 @@ class BotGUI(QMainWindow):
         buttons_layout.addWidget(self.stop_button)
         
         control_layout.addLayout(buttons_layout)
-        
-        # Лог
-        self.log_text = QTextEdit()
-        self.log_text.setReadOnly(True)
-        control_layout.addWidget(self.log_text)
         
         return control_tab
 
@@ -630,21 +648,57 @@ class BotGUI(QMainWindow):
         self.log_signal.connect(self.update_log)
         
     def update_log(self, message):
-        self.log_text.append(message)
+        # Сохраняем сообщение
+        self.log_messages.append(message)
+        self.update_log_display()
         
+        # Прокручиваем до конца
+        scrollbar = self.log_text.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+    def update_log_display(self):
+        self.log_text.clear()
+        for message in self.log_messages:
+            # Определяем уровень лога из сообщения
+            level = 'INFO'  # По умолчанию
+            for possible_level in ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']:
+                if f' - {possible_level} - ' in message:
+                    level = possible_level
+                    break
+            
+            # Проверяем, должно ли сообщение отображаться
+            if self.log_filters[level].isChecked():
+                # Добавляем HTML-форматирование в зависимости от уровня
+                color = {
+                    'DEBUG': 'gray',
+                    'INFO': 'black',
+                    'WARNING': 'orange',
+                    'ERROR': 'red',
+                    'CRITICAL': 'darkred'
+                }.get(level, 'black')
+                
+                formatted_message = f'<span style="color: {color};">{message}</span>'
+                self.log_text.append(formatted_message)
+
     def start_bot(self):
         if not self.bot_worker:
-            # Проверка наличия API ключей
-            if not self.config['API_KEYS']:
-                QMessageBox.critical(
-                    self,
-                    "Ошибка",
-                    "Необходимо добавить хотя бы один API ключ перед запуском бота.\n"
-                    "Перейдите на вкладку 'API ключи' и добавьте ключ."
-                )
-                return
-            
             self.update_config_from_ui()
+            
+            genai.configure(api_key=self.config['API_KEYS'][0])
+            
+            # Создаем объект конфигурации для генерации
+            generation_config = GenerationConfig(
+                temperature=self.temp_spin.value(),
+                top_p=self.top_p_spin.value(),
+                top_k=self.top_k_spin.value(),
+                max_output_tokens=self.max_tokens_spin.value(),
+            )
+            
+            # Создаем модель с текущими настройками
+            model = genai.GenerativeModel(self.model_combo.currentText())
+            self.config['model'] = model
+            self.config['generation_config'] = generation_config
+        
             self.bot_worker = BotWorker(self.config)
             self.bot_worker.message_received.connect(self.update_log)
             self.bot_worker.status_updated.connect(self.update_log)
@@ -653,7 +707,7 @@ class BotGUI(QMainWindow):
             self.start_button.setEnabled(False)
             self.pause_button.setEnabled(True)
             self.stop_button.setEnabled(True)
-            
+
     def pause_bot(self):
         if self.bot_worker:
             is_paused = self.bot_worker.pause()
@@ -671,12 +725,14 @@ class BotGUI(QMainWindow):
             self.update_log("Бот остановлен")
             
     def update_config_from_ui(self):
-        """Обновление конфигурации из UI и сохранение в файл"""
-        self.config['forum_url'] = self.forum_url_edit.text()
-        self.config['username'] = self.username_edit.text()
-        self.config['password'] = self.password_edit.text()
-        self.config['check_interval'] = self.interval_spin.value()
-        self.config['MESSAGE_LIMIT'] = self.message_limit_spin.value()
+        """Обновление конфигурации из UI"""
+        self.config.update({
+            'forum_url': self.forum_url_edit.text(),
+            'username': self.username_edit.text(),
+            'password': self.password_edit.text(),
+            'check_interval': self.interval_spin.value(),
+            'MESSAGE_LIMIT': self.message_limit_spin.value(),
+        })
         self.save_config()
 
     def closeEvent(self, event):
@@ -686,7 +742,7 @@ class BotGUI(QMainWindow):
         if self.file_watcher:
             self.file_watcher.stop()
             self.file_watcher.wait()
-        self.save_config()  # Сохраняем конфигурацию при закрытии
+        self.save_config()  # Сохраняе конфигурацию при закрытии
         event.accept()
 
     def save_json_memory(self):
@@ -708,13 +764,23 @@ class BotGUI(QMainWindow):
             'MESSAGE_LIMIT': 25,
             'check_interval': 5,
             'STATE_FILE': "last_id.json",
-            'API_KEYS': []
+            'API_KEYS': [],
         }
         
         try:
             with open(self.config_file, 'r', encoding='utf-8') as f:
-                self.config = json.load(f)
+                try:
+                    self.config = json.load(f)
+                    # Проверяем наличие всех необходимых полей
+                    for key in default_config:
+                        if key not in self.config:
+                            self.config[key] = default_config[key]
+                except json.JSONDecodeError as e:
+                    logger.error(f"Ошибка при чтении конфигурации: {e}")
+                    self.config = default_config
+                    self.save_config()  # Пересоздаем файл с дефолтными значениями
         except FileNotFoundError:
+            logger.info("Файл кнфигурации н найден, создаем новый с настройками по умолчанию")
             self.config = default_config
             self.save_config()
 
@@ -726,6 +792,232 @@ class BotGUI(QMainWindow):
             logger.info("Конфигурация успешно сохранена")
         except Exception as e:
             logger.error(f"Ошибка при сохранении конфигурации: {e}")
+
+    def save_settings(self):
+        """Сохранение настроек при изменении любого поля"""
+        # Создаем копию конфига без объекта модели
+        config_to_save = {
+            'forum_url': self.forum_url_edit.text(),
+            'username': self.username_edit.text(),
+            'password': self.password_edit.text(),
+            'check_interval': self.interval_spin.value(),
+            'MESSAGE_LIMIT': self.message_limit_spin.value(),
+            'STATE_FILE': "last_id.json",
+            'API_KEYS': self.config.get('API_KEYS', []),
+            'model_name': self.model_combo.currentText(),
+            'generation_config': {
+                "temperature": float(self.temp_spin.value()),  # явное приведение к float
+                "top_p": float(self.top_p_spin.value()),      # явное приведение к float
+                "top_k": int(self.top_k_spin.value()),        # явное приведение к int
+                "max_output_tokens": int(self.max_tokens_spin.value())  # явное приведение к int
+            }
+        }
+        
+        # Обновляем текущий конфиг
+        self.config.update(config_to_save)
+        
+        try:
+            with open(self.config_file, 'w', encoding='utf-8') as f:
+                json.dump(config_to_save, f, ensure_ascii=False, indent=2)
+            logger.debug("Настройки сохранены")
+        except Exception as e:
+            logger.error(f"Ошибка при сохранении конфигурации: {e}")
+
+    def create_model_settings_tab(self):
+        model_settings_tab = QWidget()
+        layout = QVBoxLayout(model_settings_tab)
+        
+        # Группа выбора модели
+        model_group = QGroupBox("Модель")
+        model_layout = QVBoxLayout()
+        
+        # Список всех известных моделей
+        all_models = [
+            # Pro модели
+            "gemini-1.5-pro-002",
+            "gemini-1.5-pro",
+            "gemini-1.0-pro",
+            "gemini-pro",
+            # Flash модели
+            "gemini-1.5-pro-001-flash",
+            "gemini-1.5-pro-flash",
+            "gemini-pro-flash",
+            # Vision модели
+            "gemini-pro-vision",
+            "gemini-1.0-pro-vision",
+            "gemini-1.5-pro-vision"
+        ]
+        
+        # Выбор модели
+        model_select_layout = QHBoxLayout()
+        
+        # Выпадающий список для выбора модели
+        model_layout.addWidget(QLabel("Выберите или введите название модели:"))
+        self.model_combo = QComboBox()
+        self.model_combo.setEditable(True)  # Разрешаем ручной ввод
+        self.model_combo.addItems(all_models)
+        current_model = self.config.get('model_name', "gemini-1.5-pro-002")
+        if current_model in all_models:
+            self.model_combo.setCurrentText(current_model)
+        else:
+            self.model_combo.addItem(current_model)
+            self.model_combo.setCurrentText(current_model)
+        
+        self.model_combo.currentTextChanged.connect(self.on_model_changed)
+        model_select_layout.addWidget(self.model_combo)
+        
+        # Кнопка для обновления списка доступных моделей
+        refresh_models_btn = QPushButton("Обновить список")
+        refresh_models_btn.clicked.connect(self.refresh_available_models)
+        model_select_layout.addWidget(refresh_models_btn)
+        
+        model_layout.addLayout(model_select_layout)
+        
+        # Информация о модели
+        self.model_info_text = QTextEdit()
+        self.model_info_text.setReadOnly(True)
+        self.model_info_text.setMaximumHeight(100)
+        model_layout.addWidget(QLabel("Информация о модели:"))
+        model_layout.addWidget(self.model_info_text)
+        
+        model_group.setLayout(model_layout)
+        layout.addWidget(model_group)
+        
+        # Группа параметров генерации
+        gen_group = QGroupBox("Параметры генерации")
+        gen_layout = QGridLayout()
+        
+        # Temperature
+        gen_layout.addWidget(QLabel("Temperature:"), 0, 0)
+        self.temp_spin = QDoubleSpinBox()
+        self.temp_spin.setRange(0.0, 1.0)
+        self.temp_spin.setSingleStep(0.01)
+        self.temp_spin.setValue(self.config.get('generation_config', {}).get('temperature', 0.15))
+        self.temp_spin.valueChanged.connect(self.save_settings)
+        gen_layout.addWidget(self.temp_spin, 0, 1)
+        
+        # Top P
+        gen_layout.addWidget(QLabel("Top P:"), 1, 0)
+        self.top_p_spin = QDoubleSpinBox()
+        self.top_p_spin.setRange(0.0, 1.0)
+        self.top_p_spin.setSingleStep(0.01)
+        self.top_p_spin.setValue(self.config.get('generation_config', {}).get('top_p', 0.25))
+        self.top_p_spin.valueChanged.connect(self.save_settings)
+        gen_layout.addWidget(self.top_p_spin, 1, 1)
+        
+        # Top K
+        gen_layout.addWidget(QLabel("Top K:"), 2, 0)
+        self.top_k_spin = QSpinBox()
+        self.top_k_spin.setRange(1, 100)
+        self.top_k_spin.setValue(self.config.get('generation_config', {}).get('top_k', 40))
+        self.top_k_spin.valueChanged.connect(self.save_settings)
+        gen_layout.addWidget(self.top_k_spin, 2, 1)
+        
+        # Max Output Tokens
+        gen_layout.addWidget(QLabel("Max Output Tokens:"), 3, 0)
+        self.max_tokens_spin = QSpinBox()
+        self.max_tokens_spin.setRange(1, 8192)
+        self.max_tokens_spin.setValue(self.config.get('generation_config', {}).get('max_output_tokens', 2048))
+        self.max_tokens_spin.valueChanged.connect(self.save_settings)
+        gen_layout.addWidget(self.max_tokens_spin, 3, 1)
+        
+        gen_group.setLayout(gen_layout)
+        layout.addWidget(gen_group)
+        
+        # Добавляем растягивающийся спейсер в конец
+        layout.addStretch()
+        
+        return model_settings_tab
+
+    def on_model_changed(self, model_name):
+        """Обработчик изменения выбранной модели"""
+        self.save_settings()
+        self.update_model_info()
+
+    def refresh_available_models(self):
+        """Обновление списка доступных моделей через API"""
+        try:
+            # Проверяем наличие API ключей
+            if not self.config.get('API_KEYS'):
+                QMessageBox.warning(
+                    self, 
+                    "Ошибка", 
+                    "API ключ не настроен. Пожалуйста, добавьте хотя бы один API ключ во вкладке 'API ключи'"
+                )
+                return
+            
+            # Настраиваем API с первым доступным ключом
+            genai.configure(api_key=self.config['API_KEYS'][0])
+            
+            # Сохраняем текущий текст
+            current_text = self.model_combo.currentText()
+            
+            # Очищаем список
+            self.model_combo.clear()
+            
+            # Получаем список доступных моделей
+            available_models = genai.list_models()
+            model_names = []
+            
+            for model in available_models:
+                model_names.append(model.name)
+            
+            # Обновляем выпадающий список
+            self.model_combo.addItems(model_names)
+            
+            # Восстанавливаем текущий выбор
+            if current_text in model_names:
+                self.model_combo.setCurrentText(current_text)
+            else:
+                self.model_combo.addItem(current_text)
+                self.model_combo.setCurrentText(current_text)
+            
+            # Обновляем информацию о текущей модели
+            self.update_model_info()
+            
+            QMessageBox.information(self, "Успех", "Список моделей успешно обновлен")
+            
+        except Exception as e:
+            error_message = str(e)
+            if "No API_KEY" in error_message:
+                error_message = "API ключ не настроен и��и недействителен. Пожалуйста, проверьте настройки API ключей."
+            
+            QMessageBox.warning(self, "Ошибка", f"Не удалось получить список моделей: {error_message}")
+            logger.error(f"Ошибка при обновлении списка моделей: {e}")
+
+    def update_model_info(self):
+        """Обновление информации о выбранной модели"""
+        try:
+            # Проверяем наличие API ключей
+            if not self.config.get('API_KEYS'):
+                self.model_info_text.setPlainText("API ключ не настроен. Информация о модели недоступна.")
+                return
+            
+            # Настраиваем API с первым доступным ключом
+            genai.configure(api_key=self.config['API_KEYS'][0])
+            
+            model_name = self.model_combo.currentText()
+            available_models = genai.list_models()
+            
+            # Ищем информацию о текущей модели
+            for model in available_models:
+                if model.name == model_name:
+                    info = (f"Модель: {model.name}\n"
+                           f"Отображаемое имя: {model.display_name}\n"
+                           f"Описание: {model.description}\n"
+                           f"Поддерживаемые генерации: {', '.join(model.supported_generation_methods)}\n"
+                           f"Токены: {model.input_token_limit} (вход) / {model.output_token_limit} (выход)")
+                    self.model_info_text.setPlainText(info)
+                    return
+                
+            self.model_info_text.setPlainText(f"Информация о модели '{model_name}' недоступна")
+            
+        except Exception as e:
+            error_message = str(e)
+            if "No API_KEY" in error_message:
+                error_message = "API ключ не настроен или недействителен."
+            self.model_info_text.setPlainText(f"Ошибка при получении информации о модели: {error_message}")
+            logger.error(f"Ошибка при обновлении информации о модели: {e}")
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
