@@ -1,6 +1,6 @@
 [Setup]
 AppName=Bot Musforums
-AppVersion=1.0
+AppVersion=1.0.1
 DefaultDirName={pf}\Bot Musforums
 DefaultGroupName=Bot Musforums
 OutputDir=Output
