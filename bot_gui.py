@@ -187,6 +187,11 @@ class JsonTreeWidget(QTreeWidget):
         delete_btn.clicked.connect(self.delete_selected_item)
         button_layout.addWidget(delete_btn)
         
+        # Добавляем кнопку сброса памяти
+        reset_btn = QPushButton("Сбросить память")
+        reset_btn.clicked.connect(self.reset_memory)
+        button_layout.addWidget(reset_btn)
+        
         self.layout.addWidget(self)
         self.layout.addLayout(button_layout)
 
@@ -348,6 +353,70 @@ class JsonTreeWidget(QTreeWidget):
                 return value
             except:
                 return value
+
+    def reset_memory(self):
+        """Сброс памяти к базовому состоянию"""
+        msg = QMessageBox()
+        msg.setIcon(QMessageBox.Icon.Warning)
+        msg.setText("Вы уверены, что хотите сбросить память к базовому состоянию?")
+        msg.setInformativeText("Это действие нельзя отменить. Все текущие данные будут потеряны.")
+        msg.setWindowTitle("Подтверждение сброса")
+        msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        
+        if msg.exec() == QMessageBox.StandardButton.Yes:
+            base_memory = {
+                "personality": {
+                    "name": "Вокальный Эксперт",
+                    "role": "Музыкальный консультант форума",
+                    "tone": "профессиональный, но дружелюбный",
+                    "expertise": [
+                        "вокальная техника",
+                        "музыкальная теория"
+                    ],
+                    "communication_style": {
+                        "formal_level": "средний",
+                        "encouragement_level": "высокий"
+                    }
+                },
+                "forum_members": {
+                    "users": {
+                        "example_user": {
+                            "recordings": [
+                                {
+                                    "title": "",
+                                    "link": "",
+                                    "analysis": {
+                                        "overall": "",
+                                        "intonation": "",
+                                        "breathing": "",
+                                        "emotionality": ""
+                                    },
+                                    "recommendations": []
+                                }
+                            ],
+                            "comments": [],
+                            "vocal_data": {
+                                "strengths": [],
+                                "weaknesses": []
+                            }
+                        }
+                    }
+                },
+                "statistics": {
+                    "total_reviews": 0,
+                    "total_interactions": 0
+                },
+                "version": "1.0.0"
+            }
+            
+            # Обновляем дерево и сохраняем в файл
+            self.load_json(base_memory)
+            try:
+                with open('updated_memory.json', 'w', encoding='utf-8') as f:
+                    json.dump(base_memory, f, ensure_ascii=False, indent=2)
+                QMessageBox.information(self, "Успех", "Память успешно сброшена к базовому состоянию")
+            except Exception as e:
+                QMessageBox.critical(self, "Ошибка", f"Ошибка при сохранении файла: {str(e)}")
 
 class BotGUI(QMainWindow):
     log_signal = pyqtSignal(str)
@@ -806,15 +875,16 @@ class BotGUI(QMainWindow):
             'API_KEYS': self.config.get('API_KEYS', []),
             'model_name': self.model_combo.currentText(),
             'generation_config': {
-                "temperature": float(self.temp_spin.value()),  # явное приведение к float
-                "top_p": float(self.top_p_spin.value()),      # явное приведение к float
-                "top_k": int(self.top_k_spin.value()),        # явное приведение к int
-                "max_output_tokens": int(self.max_tokens_spin.value())  # явное приведение к int
+                "temperature": float(self.temp_spin.value()),
+                "top_p": float(self.top_p_spin.value()),
+                "top_k": int(self.top_k_spin.value()),
+                "max_output_tokens": int(self.max_tokens_spin.value())
             }
         }
         
-        # Обновляем текущий конфиг
-        self.config.update(config_to_save)
+        # Обновляем текущий конфиг, исключая объекты, которые нельзя сериализовать
+        self.config.update({k: v for k, v in config_to_save.items() 
+                           if not isinstance(v, (GenerationConfig, genai.GenerativeModel))})
         
         try:
             with open(self.config_file, 'w', encoding='utf-8') as f:
@@ -980,7 +1050,7 @@ class BotGUI(QMainWindow):
         except Exception as e:
             error_message = str(e)
             if "No API_KEY" in error_message:
-                error_message = "API ключ не настроен и��и недействителен. Пожалуйста, проверьте настройки API ключей."
+                error_message = "API ключ не настроен ии недействителен. Пожалуйста, проверьте настройки API ключей."
             
             QMessageBox.warning(self, "Ошибка", f"Не удалось получить список моделей: {error_message}")
             logger.error(f"Ошибка при обновлении списка моделей: {e}")

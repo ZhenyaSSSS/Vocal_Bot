@@ -5,9 +5,7 @@ DefaultDirName={pf}\Bot Musforums
 DefaultGroupName=Bot Musforums
 OutputDir=Output
 OutputBaseFilename=BotMusforums_Setup
-; Добавляем требование прав администратора
 PrivilegesRequired=admin
-; Добавляем иконку установщика (если есть)
 ;SetupIconFile=myicon.ico
 Compression=lzma2
 SolidCompression=yes
